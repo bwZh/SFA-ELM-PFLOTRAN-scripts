@@ -1,0 +1,73 @@
+# clone the codes
+# 1. Clone PFLOTRAN and switch to the correct branch
+git clone https://bitbucket.org/pflotran/pflotran pflotran
+cd pflotran
+git checkout gbisht/elm-pflotran-coupling
+export PFLOTRAN_SRC_DIR=$PWD
+cd ..
+
+# 2. Clone E3SM, switch to the correct branch, and checkout submodules
+git clone https://github.com/CLM-PFLOTRAN/e3sm elm-fork
+cd elm-fork
+git checkout bishtgautam/lnd/elm-pflotran-coupled-70b3e8f36
+git submodule update --init
+cd ../
+
+#compile 
+
+# 2.1 Set path PETSc
+export PETSC_VERSION=v3.11.1
+export PETSC_DIR=/project/projectdirs/m2702/gbisht/petsc/petsc_${PETSC_VERSION}
+export PETSC_ARCH=cori_knl_intel_18_0_1
+# 2.2 Load correct modules
+module swap craype-haswell craype-mic-knl
+module swap intel/19.0.3.199 intel/18.0.1.163
+module load cray-netcdf-hdf5parallel/4.6.1.3 cray-hdf5-parallel/1.10.2.0 cray-parallel-netcdf/1.8.1.4
+
+# 2.3 Generate libpflotran.a
+cd pflotran/src/clm-pflotran/
+./link_files.sh
+make -j 4 libpflotran.a
+cd ../../../
+
+#create demo
+CASE_DIR=$PWD
+RES=1x1_brazil
+COMPSET=I1850CLM45
+MACH=cori-knl
+GIT_HASH=`git log -n 1 --format=%h`
+CASE_NAME=elm-pflotran.${RES}.${COMPSET}.${MACH}.${GIT_HASH}.`date "+%Y-%m-%d"`
+# Create an E3SM case
+cd elm-fork/cime/scripts
+./create_newcase -case ${CASE_DIR}/${CASE_NAME} \
+-res ${RES} -mach ${MACH} -compiler ${COMPILER} -compset ${COMPSET}
+cd $CASE_DIR/$CASE_NAME
+# Copy Macros file that include settings for PETSc and PFLOTRAN
+cp /project/projectdirs/m2702/gbisht/petsc/Macros.cmake.${PETSC_VERSION}.${PETSC_ARCH} ./Macros.cmake
+cp /project/projectdirs/m2702/gbisht/petsc/Macros.make.${PETSC_VERSION}.${PETSC_ARCH} ./Macros.make
+# Make changes Macros.cmake file
+perl -w -i -p -e "s@PETSC-DIR@${PETSC_DIR}@" ${CASE_DIR}/${CASE_NAME}/Macros.cmake
+perl -w -i -p -e "s@PETSC-ARCH@${PETSC_ARCH}@" ${CASE_DIR}/${CASE_NAME}/Macros.cmake
+perl -w -i -p -e "s@PFLOTRAN-SRC-DIR@${PFLOTRAN_SRC_DIR}@" ${CASE_DIR}/${CASE_NAME}/Macros.cmake
+# Make changes Macros.make file
+perl -w -i -p -e "s@PETSC-DIR@${PETSC_DIR}@" ${CASE_DIR}/${CASE_NAME}/Macros.make
+perl -w -i -p -e "s@PETSC-ARCH@${PETSC_ARCH}@" ${CASE_DIR}/${CASE_NAME}/Macros.make
+perl -w -i -p -e "s@PFLOTRAN-SRC-DIR@${PFLOTRAN_SRC_DIR}@" ${CASE_DIR}/${CASE_NAME}/Macros.make
+# Setup the case
+./case.setup
+#
+# Modify user_nl_clm
+cat >> user_nl_clm << EOF
+hist_mfilt = 1
+use_pflotran_via_emi = .true.
+pflotran_prefix = '$CASE_NAME'
+EOF
+# Build the case
+./case.build
+# Copy PFLOTRAN files in the run directory
+export RUNDIR=`./xmlquery RUNDIR | awk '{ print $2 }'`
+cp /project/projectdirs/m2702/gbisht/grids/ugrid-1x1x10-subsurface-richards-may/*.in $RUNDIR/$CASE_NAME.in
+cp /project/projectdirs/m2702/gbisht/grids/ugrid-1x1x10-subsurface-richards-may/*.mesh* $RUNDIR/
+cp /project/projectdirs/m2702/gbisht/grids/ugrid-1x1x10-subsurface-richards-may/*.ss $RUNDIR/
+# Submit a run
+./case.submit
